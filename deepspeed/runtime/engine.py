@@ -11,7 +11,7 @@ import apex
 from apex import amp
 from torch.nn.modules import Module
 from torch.distributed.distributed_c10d import _get_global_rank
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 
 from deepspeed.runtime.zero.stage2 import FP16_DeepSpeedZeroOptimizer
 from deepspeed.runtime.zero.stage1 import FP16_DeepSpeedZeroOptimizer_Stage1
