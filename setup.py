@@ -14,11 +14,25 @@ import shutil
 import subprocess
 import warnings
 import cpufeature
+import logging
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CppExtension
 
 VERSION = "0.3.0"
 
+# Setup logger to save to file and stdout
+logFormatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+rootLogger = logging.getLogger()
+
+#if int(os.environ.get("DS_BUILD_LOGFILE", 1)):
+fileHandler = logging.FileHandler(f'install-{int(time.time())}.log')
+fileHandler.setFormatter(logFormatter)
+rootLogger.addHandler(fileHandler)
+print("***********", fileHandler.baseFilename)
+consoleHandler = logging.StreamHandler()
+consoleHandler.setFormatter(logFormatter)
+rootLogger.addHandler(consoleHandler)
+rootLogger.setLevel(logging.INFO)
 
 def fetch_requirements(path):
     with open(path, 'r') as fd:
@@ -37,52 +51,34 @@ if torch.cuda.is_available():
         onebit_adam_requires.append(f"cupy-cuda{torch.version.cuda.replace('.','')[:3]}")
         install_requires += onebit_adam_requires
 
-# Constants for each op
-LAMB = "lamb"
+# Build environment variables for custom builds,
+# map deepspeed op name to environment variable
+FUSED_LAMB = "fused-lamb"
 TRANSFORMER = "transformer"
 SPARSE_ATTN = "sparse-attn"
 CPU_ADAM = "cpu-adam"
+CPU_ADAM_AVX512 = "cpu-adam-avx512"
+FUSED_ADAM = "fused-adam"
+ALL_OPS = {
+    FUSED_LAMB: "DS_BUILD_FUSED_LAMB",
+    TRANSFORMER: "DS_BUILD_TRANSFORMER",
+    SPARSE_ATTN: "DS_BUILD_SPARSE_ATTN",
+    CPU_ADAM: "DS_BUILD_CPU_ADAM",
+    CPU_ADAM_AVX512: "DS_BUILD_AVX512",
+    FUSED_ADAM: "DS_BUILD_FUSED_ADAM"
+}
+OP_DEFAULT = int(os.environ.get('DS_BUILD_CUDA', 1))
+logging.info(f"DS_BUILD_CUDA={OP_DEFAULT}")
 
-# Build environment variables for custom builds
-DS_BUILD_LAMB_MASK = 1
-DS_BUILD_TRANSFORMER_MASK = 10
-DS_BUILD_SPARSE_ATTN_MASK = 100
-DS_BUILD_CPU_ADAM_MASK = 1000
-DS_BUILD_AVX512_MASK = 10000
+def op_enabled(op_name):
+    env_var = ALL_OPS[op_name]
+    op_default = OP_DEFAULT if op_name != "cpu-adam-avx512" else cpufeature.CPUFeature['AVX512f']
+    return int(os.environ.get(env_var, OP_DEFAULT))
 
-# Allow for build_cuda to turn on or off all ops
-DS_BUILD_ALL_OPS = DS_BUILD_LAMB_MASK | DS_BUILD_TRANSFORMER_MASK | DS_BUILD_SPARSE_ATTN_MASK | DS_BUILD_CPU_ADAM_MASK | DS_BUILD_AVX512_MASK
-DS_BUILD_CUDA = int(os.environ.get('DS_BUILD_CUDA', 1)) * DS_BUILD_ALL_OPS
-
-# Set default of each op based on if build_cuda is set
-OP_DEFAULT = DS_BUILD_CUDA == DS_BUILD_ALL_OPS
-DS_BUILD_CPU_ADAM = int(os.environ.get('DS_BUILD_CPU_ADAM',
-                                       OP_DEFAULT)) * DS_BUILD_CPU_ADAM_MASK
-DS_BUILD_LAMB = int(os.environ.get('DS_BUILD_LAMB', OP_DEFAULT)) * DS_BUILD_LAMB_MASK
-DS_BUILD_TRANSFORMER = int(os.environ.get('DS_BUILD_TRANSFORMER',
-                                          OP_DEFAULT)) * DS_BUILD_TRANSFORMER_MASK
-DS_BUILD_SPARSE_ATTN = int(os.environ.get('DS_BUILD_SPARSE_ATTN',
-                                          OP_DEFAULT)) * DS_BUILD_SPARSE_ATTN_MASK
-DS_BUILD_AVX512 = int(os.environ.get(
-    'DS_BUILD_AVX512',
-    cpufeature.CPUFeature['AVX512f'])) * DS_BUILD_AVX512_MASK
-
-# Final effective mask is the bitwise OR of each op
-BUILD_MASK = (DS_BUILD_LAMB | DS_BUILD_TRANSFORMER | DS_BUILD_SPARSE_ATTN
-              | DS_BUILD_CPU_ADAM)
-
-install_ops = dict.fromkeys([LAMB, TRANSFORMER, SPARSE_ATTN, CPU_ADAM], False)
-if BUILD_MASK & DS_BUILD_LAMB:
-    install_ops[LAMB] = True
-if BUILD_MASK & DS_BUILD_CPU_ADAM:
-    install_ops[CPU_ADAM] = True
-if BUILD_MASK & DS_BUILD_TRANSFORMER:
-    install_ops[TRANSFORMER] = True
-if BUILD_MASK & DS_BUILD_SPARSE_ATTN:
-    install_ops[SPARSE_ATTN] = True
-if len(install_ops) == 0:
-    print("Building without any cuda/cpp extensions")
-print(f'BUILD_MASK={BUILD_MASK}, install_ops={install_ops}')
+install_ops = dict.fromkeys(ALL_OPS.keys(), False)
+for op_name in ALL_OPS.keys():
+    install_ops[op_name] = op_enabled(op_name)
+logging.info(f'Install Ops={install_ops}')
 
 cmdclass = {}
 cmdclass['build_ext'] = BuildExtension.with_options(use_ninja=False)
@@ -122,7 +118,7 @@ print("SIMD_WIDTH = ", SIMD_WIDTH)
 ext_modules = []
 
 ## Lamb ##
-if BUILD_MASK & DS_BUILD_LAMB:
+if op_enabled(FUSED_LAMB):
     ext_modules.append(
         CUDAExtension(name='deepspeed.ops.lamb.fused_lamb_cuda',
                       sources=[
@@ -139,7 +135,7 @@ if BUILD_MASK & DS_BUILD_LAMB:
                       }))
 
 ## Adam ##
-if BUILD_MASK & DS_BUILD_CPU_ADAM:
+if op_enabled(CPU_ADAM):
     ext_modules.append(
         CUDAExtension(name='deepspeed.ops.adam.cpu_adam_op',
                       sources=[
@@ -176,7 +172,7 @@ if BUILD_MASK & DS_BUILD_CPU_ADAM:
                       }))
 
 ## Transformer ##
-if BUILD_MASK & DS_BUILD_TRANSFORMER:
+if op_enabled(TRANSFORMER):
     ext_modules.append(
         CUDAExtension(name='deepspeed.ops.transformer.transformer_cuda',
                       sources=[
@@ -255,7 +251,7 @@ def command_exists(cmd):
 
 
 ## Sparse transformer ##
-if BUILD_MASK & DS_BUILD_SPARSE_ATTN:
+if op_enabled(SPARSE_ATTN):
     # Check to see if llvm and cmake are installed since they are dependencies
     required_commands = ['llvm-config|llvm-config-9', 'cmake']
 
