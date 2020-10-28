@@ -3,5 +3,5 @@
 	url = https://github.com/NVIDIA/apex.git
 [submodule "DeepSpeedExamples"]
 	path = DeepSpeedExamples
-	url = https://github.com/microsoft/DeepSpeedExamples
+	url = https://github.com/weilianglin101/DeepSpeedExamples
 	branch = master
